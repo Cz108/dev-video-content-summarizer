@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Summarizer & Transcriber</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 10px; }
+    h2 { font-size: 16px; }
+    textarea { width: 100%; height: 100px; }
+    button { margin: 5px 0; padding: 10px; }
+    input[type="file"] { margin-bottom: 10px; }
+    #output { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <button id="openTabBtn">Open in a new tab</button>
+
+  <h2>Text Summarization</h2>
+  <textarea id="textInput" placeholder="Enter text to summarize..."></textarea>
+  <button id="summarizeBtn">Summarize</button>
+  <div id="summaryOutput"></div>
+
+  <h2>YouTube Video Transcription & Summarization</h2>
+  <input type="text" id="youtubeLinkInput" placeholder="Enter YouTube video link" />
+  <button id="youtubeTranscribeBtn">Transcribe & Summarize</button>
+  <div id="youtubeSummaryOutput"></div>
+
+
+  <h2>Audio Transcription</h2>
+  <input type="file" id="audioInput" accept="audio/*">
+  <button id="transcribeBtn">Transcribe</button>
+  <div id="transcriptionOutput"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
