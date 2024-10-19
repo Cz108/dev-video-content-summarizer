@@ -3,6 +3,8 @@ from flask import Blueprint, request, jsonify
 import os
 import requests
 import yt_dlp
+from pydub import AudioSegment
+from langdetect import detect
 
 youtube_transcription_bp = Blueprint('youtube_transcription', __name__)
 
@@ -25,7 +27,7 @@ def load_api_key():
 def download_audio_from_youtube(url):
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': f'{TEMP_AUDIO_PATH}/%(title)s.%(ext)s',
+        'outtmpl': f'{TEMP_AUDIO_PATH}/%(id)s.%(ext)s',  # Use the video ID instead of the title
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -39,6 +41,99 @@ def download_audio_from_youtube(url):
         audio_file_path = ydl.prepare_filename(info_dict)
         audio_file_path = os.path.splitext(audio_file_path)[0] + ".mp3"  # Ensure it's saved as MP3
         return audio_file_path
+
+# Function to split the audio file into smaller chunks
+def split_audio_file(audio_file_path, chunk_duration_ms=5*60*1000):  # 5 minutes per chunk
+    audio = AudioSegment.from_mp3(audio_file_path)
+    chunks = []
+    
+    for i in range(0, len(audio), chunk_duration_ms):
+        chunk = audio[i:i + chunk_duration_ms]
+        chunk_name = f"{TEMP_AUDIO_PATH}/chunk_{i // chunk_duration_ms}.mp3"
+        chunk.export(chunk_name, format="mp3")
+        chunks.append(chunk_name)
+    
+    return chunks
+
+# Function to transcribe an audio chunk using Whisper API
+def transcribe_audio_chunk(audio_file_path, api_key):
+    url_whisper = "https://api.openai.com/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    with open(audio_file_path, 'rb') as audio_file:
+        files = {
+            "file": (audio_file.name, audio_file, "audio/mpeg"),
+            "model": (None, "whisper-1")
+        }
+
+        response = requests.post(url_whisper, headers=headers, files=files)
+        
+        if response.status_code != 200:
+            raise Exception(f"Transcription failed: {response.text}")
+
+        # Extract the transcription from the response
+        transcription = response.json()['text']
+
+        return transcription
+
+# Function to detect the majority language of the transcription
+def detect_language(text):
+    try:
+        return detect(text)  # Uses langdetect to detect the predominant language
+    except Exception as e:
+        print(f"Language detection failed: {e}")
+        return "en"  # Default to English if detection fails
+
+# Function to reword a chunk using ChatGPT
+def reword_chunk(text_chunk, api_key, language):
+    url_chatgpt = "https://api.openai.com/v1/chat/completions"
+    headers_chatgpt = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {"role": "system", "content": f"You are a helpful assistant who is specialized in {language}."},
+            {"role": "user", "content": f"Reword and summarize the following chunks in {language}:\n\n{text_chunk}"}
+        ]
+    }
+
+    response = requests.post(url_chatgpt, headers=headers_chatgpt, json=payload)
+
+    if response.status_code != 200:
+        raise Exception(f"Summarization failed: {response.text}")
+
+    summary = response.json()['choices'][0]['message']['content'].strip()
+    return summary
+
+# Function to summarize a chunk using ChatGPT
+def summarize_chunk(text_chunk, api_key, language):
+    url_chatgpt = "https://api.openai.com/v1/chat/completions"
+    headers_chatgpt = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {"role": "system", "content": f"You are a helpful assistant who summarizes in {language}."},
+            {"role": "user", "content": f"Summarize the following video contents in {language}:\n\n{text_chunk}"}
+        ],
+        "max_tokens": 500
+    }
+
+    response = requests.post(url_chatgpt, headers=headers_chatgpt, json=payload)
+
+    if response.status_code != 200:
+        raise Exception(f"Summarization failed: {response.text}")
+
+    summary = response.json()['choices'][0]['message']['content'].strip()
+    return summary
 
 # Route to transcribe and summarize YouTube video audio
 @youtube_transcription_bp.route('/transcribe_summarize_youtube', methods=['POST'])
@@ -55,56 +150,46 @@ def transcribe_summarize_youtube():
             audio_file_path = download_audio_from_youtube(youtube_url)
             print(f"Audio downloaded at: {audio_file_path}")
 
-            # Step 2: Transcribe the audio using Whisper API
-            url_whisper = "https://api.openai.com/v1/audio/transcriptions"
-            headers = {
-                "Authorization": f"Bearer {api_key}"
-            }
+            # Step 2: Split audio file into smaller chunks
+            audio_chunks = split_audio_file(audio_file_path)
+            print(f"Number of chunks: {len(audio_chunks)}")
 
-            with open(audio_file_path, 'rb') as audio_file:
-                files = {
-                    "file": (audio_file.name, audio_file, "audio/mpeg"),
-                    "model": (None, "whisper-1")
-                }
+            # Step 3: Transcribe and summarize each chunk using Whisper and ChatGPT
+            full_transcription = ""
+            chunk_summaries = []
+            for i, chunk_path in enumerate(audio_chunks):
+                print(f"Transcribing chunk {i + 1}/{len(audio_chunks)}...")
+                transcription = transcribe_audio_chunk(chunk_path, api_key)
+                full_transcription += transcription + "\n"
 
-                response = requests.post(url_whisper, headers=headers, files=files)
-                if response.status_code != 200:
-                    return jsonify({"error": "Transcription failed", "details": response.text}), 400
+                # Detect the language for the first chunk (we assume the same language for all chunks)
+                if i == 0:
+                    detected_language = detect_language(transcription)
+                    print(f"Detected language: {detected_language}")
 
-                transcription = response.json()['text']
-                print(f"Transcription: {transcription}")
+                # Summarize the transcription for this chunk
+                print(f"Summarizing chunk {i + 1}/{len(audio_chunks)}...")
+                chunk_summary = summarize_chunk(transcription, api_key, detected_language)
+                chunk_summaries.append(chunk_summary)
 
-            # Step 3: Summarize the transcription using ChatGPT
-            url_chatgpt = "https://api.openai.com/v1/chat/completions"
-            headers_chatgpt = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
+            print(f"Chunk summaries: {chunk_summaries}")
 
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": f"Summarize the following video contents:\n\n{transcription}"}
-                ],
-                "max_tokens": 150
-            }
+            # Step 4: Summarize the combined chunk summaries using ChatGPT
+            combined_chunk_summaries = " ".join(chunk_summaries)
+            print(f"Combined chunk summaries: {combined_chunk_summaries}")
 
-            response_chatgpt = requests.post(url_chatgpt, headers=headers_chatgpt, json=payload)
+            final_summary = reword_chunk(combined_chunk_summaries, api_key, detected_language)
+            print(f"Final summary: {final_summary}")
 
-            if response_chatgpt.status_code != 200:
-                return jsonify({"error": "Summarization failed", "details": response_chatgpt.text}), 400
-
-            summary = response_chatgpt.json()['choices'][0]['message']['content'].strip()
-            print(f"Summary: {summary}")
-
-            # Step 4: Clean up the downloaded audio file
+            # Step 5: Clean up the downloaded audio file and chunks
             if audio_file_path and os.path.exists(audio_file_path):
                 os.remove(audio_file_path)
+            for chunk in audio_chunks:
+                if os.path.exists(chunk):
+                    os.remove(chunk)
 
-            # return jsonify({"transcription": transcription, "summary": summary})
-            result = response_chatgpt.json()
-            return jsonify(result['choices'][0]['message']['content'].strip())
+            # Return only the final summary as a JSON object
+            return jsonify(final_summary)
         else:
             return jsonify({"error": "Invalid request. No URL or API key provided."}), 400
 
