@@ -1,3 +1,6 @@
 flask-backend/config/config.json
 flask-backend/venv/
 .video-content-summarizer/
+flask-backend/blueprints/__pycache__/
+*.pyc
+
