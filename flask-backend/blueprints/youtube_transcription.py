@@ -5,6 +5,7 @@ import requests
 import yt_dlp
 from pydub import AudioSegment
 from langdetect import detect
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 youtube_transcription_bp = Blueprint('youtube_transcription', __name__)
 
@@ -135,6 +136,12 @@ def summarize_chunk(text_chunk, api_key, language):
     summary = response.json()['choices'][0]['message']['content'].strip()
     return summary
 
+# Parallel transcription and summarization for each chunk
+def transcribe_and_summarize_chunk(chunk_path, api_key, detected_language):
+    transcription = transcribe_audio_chunk(chunk_path, api_key)
+    chunk_summary = summarize_chunk(transcription, api_key, detected_language)
+    return transcription, chunk_summary
+
 # Route to transcribe and summarize YouTube video audio
 @youtube_transcription_bp.route('/transcribe_summarize_youtube', methods=['POST'])
 def transcribe_summarize_youtube():
@@ -154,23 +161,27 @@ def transcribe_summarize_youtube():
             audio_chunks = split_audio_file(audio_file_path)
             print(f"Number of chunks: {len(audio_chunks)}")
 
-            # Step 3: Transcribe and summarize each chunk using Whisper and ChatGPT
+            # Step 3: Transcribe and summarize each chunk using Whisper and ChatGPT in parallel
             full_transcription = ""
             chunk_summaries = []
-            for i, chunk_path in enumerate(audio_chunks):
-                print(f"Transcribing chunk {i + 1}/{len(audio_chunks)}...")
-                transcription = transcribe_audio_chunk(chunk_path, api_key)
-                full_transcription += transcription + "\n"
 
-                # Detect the language for the first chunk (we assume the same language for all chunks)
-                if i == 0:
-                    detected_language = detect_language(transcription)
-                    print(f"Detected language: {detected_language}")
+            # Detect the language using the first chunk
+            print(f"Transcribing first chunk for language detection...")
+            first_chunk_transcription = transcribe_audio_chunk(audio_chunks[0], api_key)
+            detected_language = detect_language(first_chunk_transcription)
+            print(f"Detected language: {detected_language}")
 
-                # Summarize the transcription for this chunk
-                print(f"Summarizing chunk {i + 1}/{len(audio_chunks)}...")
-                chunk_summary = summarize_chunk(transcription, api_key, detected_language)
-                chunk_summaries.append(chunk_summary)
+            # Use ThreadPoolExecutor to parallelize the transcription and summarization
+            with ThreadPoolExecutor() as executor:
+                future_tasks = {
+                    executor.submit(transcribe_and_summarize_chunk, chunk_path, api_key, detected_language): chunk_path
+                    for chunk_path in audio_chunks
+                }
+
+                for future in as_completed(future_tasks):
+                    transcription, chunk_summary = future.result()
+                    full_transcription += transcription + "\n"
+                    chunk_summaries.append(chunk_summary)
 
             print(f"Chunk summaries: {chunk_summaries}")
 
